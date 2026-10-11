@@ -1,47 +1,85 @@
 import { useState, useEffect } from 'react'
-import { usePrices, useNow, getCurrentEntry, tocents } from './hooks/usePrices'
+import { usePrices, useNow, getCurrentEntry, tocents, getPriceClass, getTrendArrow, parseFixedPrice, formatCents } from './hooks/usePrices'
 import SettingsBar from './components/SettingsBar'
 import SummaryCards from './components/SummaryCards'
 import PriceChart from './components/PriceChart'
 import Comparison from './components/Comparison'
 import BestTimes from './components/BestTimes'
 
-function priceClass(cents, fixed) {
-    if (cents < fixed) return 'cheap'
-    if (cents < fixed * 1.4) return 'moderate'
-    return 'expensive'
+const DEFAULT_FIXED_PRICE = 8.5
+const FIXED_PRICE_STORAGE_KEY = 'fixedPrice'
+const THEME_STORAGE_KEY = 'theme'
+const THEMES = ['light', 'dark']
+
+function readStoredFixedPrice() {
+    try {
+        return parseFixedPrice(localStorage.getItem(FIXED_PRICE_STORAGE_KEY)) ?? DEFAULT_FIXED_PRICE
+    } catch {
+        return DEFAULT_FIXED_PRICE
+    }
 }
 
-function fmtCountdown(seconds) {
-    const m = Math.floor(seconds / 60).toString().padStart(2, '0')
-    const s = (seconds % 60).toString().padStart(2, '0')
-    return `${m}:${s}`
+function storeFixedPrice(price) {
+    try {
+        localStorage.setItem(FIXED_PRICE_STORAGE_KEY, String(price))
+    } catch {
+        // Storage can be unavailable (private mode); the rate then lasts for this visit only.
+    }
+}
+
+function readInitialTheme() {
+    try {
+        const stored = localStorage.getItem(THEME_STORAGE_KEY)
+        if (THEMES.includes(stored)) return stored
+    } catch {
+        // Fall through to the system preference.
+    }
+    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
+function storeTheme(theme) {
+    try {
+        localStorage.setItem(THEME_STORAGE_KEY, theme)
+    } catch {
+        // Storage can be unavailable (private mode); the theme then lasts for this visit only.
+    }
+}
+
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme)
+}
+
+function fmtClock(date) {
+    return date.toLocaleTimeString('fi-FI', {
+        timeZone: 'Europe/Helsinki',
+        hour: '2-digit',
+        minute: '2-digit',
+    })
 }
 
 export default function App() {
-    const [fixedPrice, setFixedPrice] = useState(8.5)
-    const { data, loading, error, lastUpdated } = usePrices()
+    const [fixedPrice, setFixedPrice] = useState(readStoredFixedPrice)
+    const { data, loading, error, lastUpdated, retry } = usePrices()
     const [heroVisible, setHeroVisible] = useState(true)
-    const [countdown, setCountdown] = useState(null)
+    const [theme, setTheme] = useState(readInitialTheme)
 
-    const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light')
+    function changeFixedPrice(price) {
+        setFixedPrice(price)
+        storeFixedPrice(price)
+    }
+
+    // Applied in the click handler as well as the effect, so the chart reads the new
+    // theme's colour tokens on the very render that the switch triggers.
+    function toggleTheme() {
+        const next = theme === 'dark' ? 'light' : 'dark'
+        applyTheme(next)
+        storeTheme(next)
+        setTheme(next)
+    }
 
     useEffect(() => {
-        document.documentElement.setAttribute('data-theme', theme)
-        localStorage.setItem('theme', theme)
+        applyTheme(theme)
     }, [theme])
-
-    // Countdown to next refresh
-    useEffect(() => {
-        if (!lastUpdated) return
-        const tick = () => {
-            const elapsed = Math.floor((Date.now() - lastUpdated) / 1000)
-            setCountdown(Math.max(0, 15 * 60 - elapsed))
-        }
-        tick()
-        const id = setInterval(tick, 1000)
-        return () => clearInterval(id)
-    }, [lastUpdated])
 
     // Track hero card visibility for sticky header
     useEffect(() => {
@@ -55,38 +93,33 @@ export default function App() {
         return () => obs.disconnect()
     }, [data])
 
-    // Update browser tab title
-    useEffect(() => {
-        if (!data.length) return
-        const current = getCurrentEntry(data)
-        if (current) {
-            document.title = `${tocents(current.PriceNoTax).toFixed(2)} snt — Sähkön hinnat`
-        }
-    }, [data])
-
     const nowMs = useNow()
     const current = data.length ? getCurrentEntry(data, nowMs) : null
     const currentCents = current ? tocents(current.PriceNoTax) : null
     const nextEntry = data.find(p => new Date(p.DateTime).getTime() > nowMs)
     const nextCents = nextEntry ? tocents(nextEntry.PriceNoTax) : null
 
+    useEffect(() => {
+        if (currentCents !== null) {
+            document.title = `${formatCents(currentCents)} snt — Sähkön hinnat`
+        }
+    }, [currentCents])
+
     return (
         <div className="app">
-            {/* Compact sticky header — visible once hero scrolls out of view */}
             {!heroVisible && currentCents !== null && (
-                <div className={`sticky-price-bar ${priceClass(currentCents, fixedPrice)}`}>
+                <div className={`sticky-price-bar ${getPriceClass(currentCents, fixedPrice)}`}>
                     <div className="sticky-left">
                         <span className="sticky-label">Nyt</span>
-                        <span className="sticky-price">{currentCents.toFixed(2)} snt</span>
+                        <span className="sticky-price">{formatCents(currentCents)} snt</span>
                         {nextCents !== null && (
-                            <span className={`sticky-trend ${nextCents > currentCents ? 'trend-up' : 'trend-down'}`}>
-                                {nextCents > currentCents ? '↑' : '↓'} {nextCents.toFixed(2)} snt
+                            <span className={`sticky-trend ${getPriceClass(nextCents, fixedPrice)}`}>
+                                <span aria-hidden="true">{getTrendArrow(currentCents, nextCents)} </span>
+                                <span className="visually-hidden">Seuraava jakso </span>
+                                {formatCents(nextCents)} snt
                             </span>
                         )}
                     </div>
-                    {countdown !== null && (
-                        <span className="sticky-countdown">↻ {fmtCountdown(countdown)}</span>
-                    )}
                 </div>
             )}
 
@@ -97,42 +130,47 @@ export default function App() {
                 </div>
                 <div className="header-right">
                     {lastUpdated && (
-                        <div className="header-meta">
-                            <span className="updated-at">
-                                Päivitetty {lastUpdated.toLocaleTimeString('fi-FI', {
-                                    timeZone: 'Europe/Helsinki',
-                                    hour: '2-digit',
-                                    minute: '2-digit',
-                                })}
-                            </span>
-                            {countdown !== null && (
-                                <span className="next-refresh">↻ {fmtCountdown(countdown)}</span>
-                            )}
-                        </div>
+                        <p className="updated-at" role="status">
+                            Päivitetty {fmtClock(lastUpdated)}
+                        </p>
                     )}
                     <button
+                        type="button"
                         className="theme-toggle"
-                        onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+                        onClick={toggleTheme}
                         aria-label={theme === 'dark' ? 'Vaihda vaaleaan teemaan' : 'Vaihda tummaan teemaan'}
                     >
-                        {theme === 'dark' ? '☀' : '☾'}
+                        <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
                     </button>
                 </div>
             </header>
 
-            <SettingsBar fixedPrice={fixedPrice} onChange={setFixedPrice} />
+            <main>
+                {loading && <p className="status-msg" role="status">Ladataan hintoja…</p>}
 
-            {loading && <div className="status-msg">Ladataan hintoja...</div>}
-            {error && <div className="status-msg error">{error}</div>}
+                {error && (
+                    <div className="status-msg error" role="alert">
+                        <p>
+                            {error}
+                            {data.length > 0 && lastUpdated && ` Näytetään klo ${fmtClock(lastUpdated)} haetut hinnat.`}
+                        </p>
+                        <button type="button" className="retry-btn" onClick={retry}>
+                            Yritä uudelleen
+                        </button>
+                    </div>
+                )}
 
-            {!loading && data.length > 0 && (
-                <>
-                    <SummaryCards data={data} fixedPrice={fixedPrice} nowMs={nowMs} />
-                    <PriceChart data={data} fixedPrice={fixedPrice} theme={theme} />
-                    <Comparison data={data} fixedPrice={fixedPrice} />
-                    <BestTimes data={data} fixedPrice={fixedPrice} />
-                </>
-            )}
+                {!loading && data.length > 0 && (
+                    <>
+                        <SummaryCards data={data} fixedPrice={fixedPrice} nowMs={nowMs}>
+                            <SettingsBar fixedPrice={fixedPrice} onChange={changeFixedPrice} />
+                        </SummaryCards>
+                        <PriceChart data={data} fixedPrice={fixedPrice} theme={theme} nowMs={nowMs} />
+                        <Comparison data={data} fixedPrice={fixedPrice} />
+                        <BestTimes data={data} fixedPrice={fixedPrice} nowMs={nowMs} />
+                    </>
+                )}
+            </main>
         </div>
     )
 }

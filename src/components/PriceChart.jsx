@@ -12,25 +12,31 @@ import {
     Legend,
 } from 'chart.js'
 import { Chart } from 'react-chartjs-2'
-import { tocents, getTodayStr, getTomorrowStr, toHourly, useNow } from '../hooks/usePrices'
+import { tocents, getTodayStr, getTomorrowStr, toHourly, getPriceClass, formatCents, formatRate } from '../hooks/usePrices'
 
-// Custom plugin: vertical "now" line
+// Custom plugin: labelled vertical "now" marker
 const nowLinePlugin = {
     id: 'nowLine',
     afterDatasetsDraw(chart) {
-        const { index, color = 'rgba(0,0,0,0.2)' } = chart.options.plugins?.nowLine ?? {}
+        const { index, color } = chart.options.plugins?.nowLine ?? {}
         if (index == null || index < 0) return
         const bar = chart.getDatasetMeta(0).data[index]
         if (!bar) return
         const { ctx, chartArea } = chart
         ctx.save()
         ctx.strokeStyle = color
-        ctx.lineWidth = 1.5
+        ctx.fillStyle = color
+        ctx.globalAlpha = 0.75
+        ctx.lineWidth = 2
         ctx.setLineDash([4, 3])
         ctx.beginPath()
-        ctx.moveTo(bar.x, chartArea.top)
+        ctx.moveTo(bar.x, chartArea.top + 14)
         ctx.lineTo(bar.x, chartArea.bottom)
         ctx.stroke()
+        ctx.globalAlpha = 1
+        ctx.font = '600 11px system-ui, -apple-system, sans-serif'
+        ctx.textAlign = 'center'
+        ctx.fillText('Nyt', bar.x, chartArea.top + 10)
         ctx.restore()
     },
 }
@@ -42,15 +48,19 @@ ChartJS.register(
     PointElement, Tooltip, Legend, nowLinePlugin
 )
 
-const COLORS = {
-    dark:  { cheap: '#48c990', moderate: '#e8c400', expensive: '#e87070', tick: '#a8998e', gridX: '#181310', gridY: '#3a3028', nowLine: 'rgba(255,255,255,0.2)',  fixedLine: '#e8c400', legendCheap: '#48c990', legendModerate: '#e8c400', legendExpensive: '#e87070' },
-    light: { cheap: '#1a7a52', moderate: '#a07218', expensive: '#b82020', tick: '#8c7e72', gridX: '#f3f0ec', gridY: '#e8e2da', nowLine: 'rgba(0,0,0,0.15)',       fixedLine: '#a07218', legendCheap: '#1a7a52', legendModerate: '#a07218', legendExpensive: '#b82020' },
-}
-
-function getColor(cents, fixedPrice, c) {
-    if (cents < fixedPrice) return c.cheap
-    if (cents < fixedPrice * 1.4) return c.moderate
-    return c.expensive
+// Canvas drawing can't use CSS variables directly, so the theme's tokens are read once per theme.
+function readChartColors() {
+    const styles = getComputedStyle(document.documentElement)
+    const token = name => styles.getPropertyValue(name).trim()
+    return {
+        cheap: token('--cheap'),
+        moderate: token('--moderate'),
+        expensive: token('--expensive'),
+        tick: token('--muted'),
+        gridX: token('--surface2'),
+        gridY: token('--border'),
+        now: token('--text'),
+    }
 }
 
 function fmtTime(dateStr) {
@@ -62,9 +72,12 @@ function fmtTime(dateStr) {
 }
 
 const MIN_BAR_WIDTH = { '15min': 14, '1hour': 36 }
+const VIEW_OPTIONS = [['today', 'Tänään'], ['tomorrow', 'Huomenna'], ['both', 'Molemmat']]
+const INTERVAL_OPTIONS = [['15min', '15 min'], ['1hour', '1 tunti']]
 
-export default function PriceChart({ data, fixedPrice, theme }) {
-    const c = COLORS[theme] ?? COLORS.light
+export default function PriceChart({ data, fixedPrice, theme, nowMs }) {
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the tokens change when the theme does
+    const c = useMemo(() => readChartColors(), [theme])
     const [showFixed, setShowFixed] = useState(false)
     const [view, setView] = useState('today')
     const [intervalMode, setIntervalMode] = useState('15min')
@@ -72,7 +85,6 @@ export default function PriceChart({ data, fixedPrice, theme }) {
     const scrollRef = useRef(null)
     const containerRef = useRef(null)
 
-    const nowMs = useNow()
     const todayStr = getTodayStr()
     const tomorrowStr = getTomorrowStr()
 
@@ -159,23 +171,26 @@ export default function PriceChart({ data, fixedPrice, theme }) {
     }, [chartData, intervalMode, view, containerWidth])
 
     const prices = chartData.map(p => tocents(p.PriceNoTax))
-    const colors = prices.map(p => getColor(p, fixedPrice, c))
-    const borderColors = prices.map((_, i) =>
-        i === currentIndex ? 'rgba(255,255,255,0.7)' : 'transparent'
-    )
-    const borderWidths = prices.map((_, i) => i === currentIndex ? 2 : 0)
+    const colors = prices.map(p => c[getPriceClass(p, fixedPrice)])
 
-    const labels = chartData.map(p => {
-        const prefix = view === 'both'
-            ? (p.DateTime.slice(0, 10) === todayStr ? 'T ' : 'H ')
-            : ''
-        return prefix + fmtTime(p.DateTime)
-    })
+    const dayPrefix = p => view === 'both'
+        ? (p.DateTime.slice(0, 10) === todayStr ? 'T ' : 'H ')
+        : ''
+    const labels = chartData.map(p => dayPrefix(p) + fmtTime(p.DateTime))
 
     const chartWidth = Math.max(chartData.length * MIN_BAR_WIDTH[intervalMode], containerWidth)
 
     const intervalLabel = intervalMode === '1hour' ? 'tunnittain' : '15 min'
     const dayLabel = view === 'today' ? 'Tänään' : view === 'tomorrow' ? 'Huomenna' : 'Tänään & huomenna'
+
+    let summary = ''
+    if (prices.length) {
+        const minIndex = prices.indexOf(Math.min(...prices))
+        const maxIndex = prices.indexOf(Math.max(...prices))
+        summary = ` Halvin klo ${labels[minIndex]}, ${formatCents(prices[minIndex])} snt.` +
+            ` Kallein klo ${labels[maxIndex]}, ${formatCents(prices[maxIndex])} snt.`
+    }
+    const chartLabel = `Hintakaavio, ${dayLabel.toLowerCase()}, ${intervalLabel}.${summary}`
 
     const chartConfig = {
         labels,
@@ -185,16 +200,14 @@ export default function PriceChart({ data, fixedPrice, theme }) {
                 label: 'Hinta (snt/kWh)',
                 data: prices,
                 backgroundColor: colors,
-                borderColor: borderColors,
-                borderWidth: borderWidths,
                 borderRadius: 2,
                 barPercentage: 0.85,
             },
             {
                 type: 'line',
-                label: `Kiinteä (${fixedPrice} snt)`,
+                label: `Kiinteä (${formatRate(fixedPrice)} snt)`,
                 data: Array(chartData.length).fill(fixedPrice),
-                borderColor: c.fixedLine,
+                borderColor: c.moderate,
                 borderDash: [6, 3],
                 borderWidth: 2,
                 pointRadius: 0,
@@ -209,17 +222,17 @@ export default function PriceChart({ data, fixedPrice, theme }) {
         maintainAspectRatio: false,
         animation: false,
         plugins: {
-            nowLine: { index: currentIndex, color: c.nowLine },
+            nowLine: { index: currentIndex, color: c.now },
             legend: { display: false },
             tooltip: {
                 callbacks: {
                     label: ctx => {
                         if (ctx.datasetIndex === 0) {
-                            const diff = (ctx.raw - fixedPrice).toFixed(2)
-                            const sign = diff > 0 ? '+' : ''
-                            return `${ctx.raw.toFixed(2)} snt (${sign}${diff} snt vs kiinteä)`
+                            const diff = ctx.raw - fixedPrice
+                            const sign = diff > 0 ? '+' : diff < 0 ? '−' : ''
+                            return `${formatCents(ctx.raw)} snt (${sign}${formatCents(Math.abs(diff))} snt vs kiinteä)`
                         }
-                        return `Kiinteä: ${ctx.raw} snt`
+                        return `Kiinteä: ${formatRate(ctx.raw)} snt`
                     }
                 }
             }
@@ -229,14 +242,14 @@ export default function PriceChart({ data, fixedPrice, theme }) {
                 ticks: {
                     color: c.tick,
                     maxRotation: 60,
-                    font: { size: 10 },
+                    font: { size: 11 },
                     autoSkip: true,
                     maxTicksLimit: intervalMode === '15min' ? 24 : 12,
                 },
                 grid: { color: c.gridX }
             },
             y: {
-                ticks: { color: c.tick, callback: v => v + ' snt', font: { size: 11 } },
+                ticks: { color: c.tick, callback: v => `${formatRate(v)} snt`, font: { size: 12 } },
                 grid: { color: c.gridY }
             }
         }
@@ -247,65 +260,92 @@ export default function PriceChart({ data, fixedPrice, theme }) {
             <div className="chart-header">
                 <h2 className="section-title">{dayLabel} — {intervalLabel}</h2>
                 <div className="chart-controls">
-                    <div className="toggle-group">
-                        {[['today', 'Tänään'], ['tomorrow', 'Huomenna'], ['both', 'Molemmat']].map(([v, label]) => (
+                    <div className="toggle-group" role="group" aria-label="Näytettävä päivä">
+                        {VIEW_OPTIONS.map(([value, label]) => (
                             <button
-                                key={v}
-                                className={view === v ? 'toggle-btn active' : 'toggle-btn'}
-                                onClick={() => setView(v)}
+                                key={value}
+                                type="button"
+                                className={view === value ? 'toggle-btn active' : 'toggle-btn'}
+                                aria-pressed={view === value}
+                                onClick={() => setView(value)}
                             >
                                 {label}
                             </button>
                         ))}
                     </div>
-                    <div className="toggle-group">
-                        {[['15min', '15 min'], ['1hour', '1 tunti']].map(([val, label]) => (
+                    <div className="toggle-group" role="group" aria-label="Kaavion tarkkuus ja vertailuviiva">
+                        {INTERVAL_OPTIONS.map(([value, label]) => (
                             <button
-                                key={val}
-                                className={intervalMode === val ? 'toggle-btn active' : 'toggle-btn'}
-                                onClick={() => setIntervalMode(val)}
+                                key={value}
+                                type="button"
+                                className={intervalMode === value ? 'toggle-btn active' : 'toggle-btn'}
+                                aria-pressed={intervalMode === value}
+                                onClick={() => setIntervalMode(value)}
                             >
                                 {label}
                             </button>
                         ))}
                         <button
+                            type="button"
                             className={showFixed ? 'toggle-btn active' : 'toggle-btn'}
+                            aria-pressed={showFixed}
                             onClick={() => setShowFixed(f => !f)}
                         >
-                            Kiinteä {fixedPrice} snt
+                            Kiinteä {formatRate(fixedPrice)} snt
                         </button>
                     </div>
                 </div>
             </div>
 
-            <div style={{ position: 'relative' }}>
-                <div ref={scrollRef} className="chart-scroll-wrapper">
-                    {chartData.length === 0 && view === 'tomorrow' ? (
-                        <div className="chart-empty" role="status">
-                            Huomisen hinnat julkaistaan yleensä noin klo 14:15.
-                        </div>
-                    ) : (
-                        <div style={{ width: chartWidth, height: 280 }}>
-                            <Chart
-                                key={`${view}-${intervalMode}`}
-                                type="bar"
-                                data={chartConfig}
-                                options={options}
-                                width={chartWidth}
-                                height={280}
-                                aria-label={`Sähkön hintakaavio — ${dayLabel}, ${intervalLabel}`}
-                                role="img"
-                            />
-                        </div>
-                    )}
-                </div>
+            <div
+                ref={scrollRef}
+                className="chart-scroll-wrapper"
+                tabIndex={0}
+                role="region"
+                aria-label="Hintakaavio, vieritä nuolinäppäimillä"
+            >
+                {chartData.length === 0 && view === 'tomorrow' ? (
+                    <div className="chart-empty" role="status">
+                        Huomisen hinnat julkaistaan yleensä noin klo 14.15.
+                    </div>
+                ) : (
+                    <div style={{ width: chartWidth, height: 280 }}>
+                        <Chart
+                            key={`${view}-${intervalMode}`}
+                            type="bar"
+                            data={chartConfig}
+                            options={options}
+                            width={chartWidth}
+                            height={280}
+                            aria-label={chartLabel}
+                            role="img"
+                        />
+                    </div>
+                )}
             </div>
 
+            {chartData.length > 0 && (
+                <table className="visually-hidden">
+                    <caption>Hinnat, {dayLabel.toLowerCase()}, {intervalLabel}</caption>
+                    <thead>
+                        <tr><th scope="col">Aika</th><th scope="col">Hinta snt/kWh</th></tr>
+                    </thead>
+                    <tbody>
+                        {chartData.map((p, i) => (
+                            <tr key={p.DateTime}>
+                                <th scope="row">{labels[i]}{i === currentIndex ? ' (nyt)' : ''}</th>
+                                <td>{formatCents(prices[i])}</td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            )}
+
             <div className="chart-legend">
-                <span className="legend-dot" style={{ background: c.legendCheap }} /> Alle kiinteän
-                <span className="legend-dot" style={{ background: c.legendModerate }} /> Kohtalainen
-                <span className="legend-dot" style={{ background: c.legendExpensive }} /> Kallis
-                {view !== 'tomorrow' && <span className="legend-now">— valkoinen reuna = nyt</span>}
+                <span><span className="legend-dot" style={{ background: c.cheap }} aria-hidden="true" />Halpa: alle kiinteän</span>
+                <span><span className="legend-dot" style={{ background: c.moderate }} aria-hidden="true" />Kohtalainen: enintään +40 %</span>
+                <span><span className="legend-dot" style={{ background: c.expensive }} aria-hidden="true" />Kallis: yli +40 %</span>
+                {view !== 'tomorrow' && <span>Katkoviiva = nyt</span>}
             </div>
         </div>
     )

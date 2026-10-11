@@ -1,19 +1,18 @@
 import { useState } from 'react'
+import { parseFixedPrice, formatRate } from '../hooks/usePrices'
 
 export default function SettingsBar({ fixedPrice, onChange }) {
-    const [raw, setRaw] = useState(String(fixedPrice))
+    const [raw, setRaw] = useState(formatRate(fixedPrice))
+    const isValid = parseFixedPrice(raw) !== null
 
     function handleChange(e) {
-        const val = e.target.value.replace(',', '.')
         setRaw(e.target.value)
-        const num = parseFloat(val)
-        if (!isNaN(num) && num >= 0) onChange(num)
+        const num = parseFixedPrice(e.target.value)
+        if (num !== null) onChange(num)
     }
 
     function handleBlur() {
-        const val = raw.replace(',', '.')
-        const num = parseFloat(val)
-        if (isNaN(num) || num < 0) setRaw(String(fixedPrice))
+        if (!isValid) setRaw(formatRate(fixedPrice))
     }
 
     return (
@@ -24,15 +23,20 @@ export default function SettingsBar({ fixedPrice, onChange }) {
                     id="fixed-input"
                     type="text"
                     inputMode="decimal"
+                    autoComplete="off"
                     value={raw}
                     onChange={handleChange}
                     onBlur={handleBlur}
+                    aria-invalid={!isValid}
+                    aria-describedby={isValid ? undefined : 'fixed-input-error'}
                 />
                 <span className="unit-label">snt/kWh</span>
             </div>
-            <div className="fixed-badge">
-                Vertailuhinta: {fixedPrice.toFixed(1)} snt/kWh
-            </div>
+            {!isValid && (
+                <p id="fixed-input-error" className="settings-error">
+                    Anna hinta väliltä 0,01–100 snt/kWh. Vertailu käyttää edellistä hintaa {formatRate(fixedPrice)} snt.
+                </p>
+            )}
         </div>
     )
 }

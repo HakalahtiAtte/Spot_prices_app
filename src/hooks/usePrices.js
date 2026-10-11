@@ -2,8 +2,48 @@ import { useState, useEffect } from 'react'
 
 const VAT = 1.255
 
+// VAT is added only to positive prices; negative prices are shown as the bare spot price.
 export function tocents(priceNoTax) {
-    return priceNoTax * VAT * 100
+    return priceNoTax < 0 ? priceNoTax * 100 : priceNoTax * VAT * 100
+}
+
+export function vatLabel(cents) {
+    return cents < 0 ? 'ei ALV:tä' : 'sis. ALV'
+}
+
+// Prices are judged against the user's own fixed contract, not the market:
+// below it is cheap, up to 40 % above it is moderate, beyond that is expensive.
+const MODERATE_LIMIT = 1.4
+
+export function getPriceClass(cents, fixedPrice) {
+    if (cents < fixedPrice) return 'cheap'
+    if (cents < fixedPrice * MODERATE_LIMIT) return 'moderate'
+    return 'expensive'
+}
+
+const MIN_FIXED_PRICE = 0.01
+const MAX_FIXED_PRICE = 100
+
+// Accepts user or stored input like "8,5" or "8.5"; returns null for anything outside the allowed range.
+export function parseFixedPrice(value) {
+    const text = String(value ?? '').trim().replace(',', '.')
+    if (!/^\d+(\.\d+)?$/.test(text)) return null
+    const num = Number(text)
+    return num >= MIN_FIXED_PRICE && num <= MAX_FIXED_PRICE ? num : null
+}
+
+export function getTrendArrow(currentCents, nextCents) {
+    if (nextCents > currentCents) return '↑'
+    if (nextCents < currentCents) return '↓'
+    return '→'
+}
+
+export function formatCents(cents) {
+    return cents.toLocaleString('fi-FI', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+export function formatRate(rate) {
+    return rate.toLocaleString('fi-FI', { maximumFractionDigits: 2 })
 }
 
 export function getTodayStr() {
@@ -56,8 +96,10 @@ export function usePrices() {
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState(null)
     const [lastUpdated, setLastUpdated] = useState(null)
+    const [reloadKey, setReloadKey] = useState(0)
 
     useEffect(() => {
+        let cancelled = false
         async function load() {
             setError(null)
             try {
@@ -67,19 +109,26 @@ export function usePrices() {
                 if (!Array.isArray(json)) throw new Error('Unexpected response format')
                 const valid = json.filter(p => p && typeof p.DateTime === 'string' && typeof p.PriceNoTax === 'number' && isFinite(p.PriceNoTax))
                 const sorted = valid.sort((a, b) => new Date(a.DateTime) - new Date(b.DateTime))
+                if (cancelled) return
                 setData(sorted)
                 setLastUpdated(new Date())
             } catch (e) {
+                if (cancelled) return
                 console.error('Hintojen lataus epäonnistui', e)
-                setError('Hintojen lataus epäonnistui. Yritä uudelleen.')
+                setError('Hintojen lataus epäonnistui.')
             } finally {
-                setLoading(false)
+                if (!cancelled) setLoading(false)
             }
         }
         load()
         const interval = setInterval(load, 15 * 60 * 1000)
-        return () => clearInterval(interval)
-    }, [])
+        return () => {
+            cancelled = true
+            clearInterval(interval)
+        }
+    }, [reloadKey])
 
-    return { data, loading, error, lastUpdated }
+    const retry = () => setReloadKey(key => key + 1)
+
+    return { data, loading, error, lastUpdated, retry }
 }
